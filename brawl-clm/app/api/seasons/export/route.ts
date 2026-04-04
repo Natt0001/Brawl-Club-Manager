@@ -402,7 +402,7 @@ function addClubSheet(
   sheet.mergeCells(`A${statsRow + 3}:J${statsRow + 3}`);
   const legendCell = sheet.getCell(`A${statsRow + 3}`);
   legendCell.value =
-    'Rouge = moins de l'objectif • Sans couleur = entre objectif et moitié du gros objectif • Bleu = moitié du gros objectif atteinte • Vert = gros objectif atteint';
+    "Rouge = moins de l'objectif • Sans couleur = entre objectif et moitié du gros objectif • Bleu = moitié du gros objectif atteinte • Vert = gros objectif atteint";
   legendCell.font = { color: { argb: 'FF64748B' }, italic: true, size: 10 };
 }
 
