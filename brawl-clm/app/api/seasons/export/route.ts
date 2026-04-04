@@ -139,9 +139,12 @@ function getPerformanceStatus(
   objective: number,
   bigObjective: number,
 ): 'bad' | 'neutral' | 'blue' | 'good' {
+  const halfBigObjective = bigObjective > 0 ? bigObjective / 2 : 0;
+  const blueThreshold = Math.max(objective, halfBigObjective);
+
   if (bigObjective > 0 && push >= bigObjective) return 'good';
-  if (bigObjective > 0 && push >= bigObjective / 2) return 'blue';
   if (objective > 0 && push < objective) return 'bad';
+  if (blueThreshold > 0 && push >= blueThreshold) return 'blue';
   return 'neutral';
 }
 
@@ -151,7 +154,7 @@ function getPerformanceLabel(push: number, objective: number, bigObjective: numb
   if (status === 'good') return 'Gros objectif atteint';
   if (status === 'blue') return 'Moitié du gros objectif atteinte';
   if (status === 'bad') return 'Sous objectif';
-  return 'Objectif atteint';
+  return 'Entre objectif et moitié du gros objectif';
 }
 
 function getFillForStatus(status: 'bad' | 'neutral' | 'blue' | 'good') {
@@ -399,7 +402,7 @@ function addClubSheet(
   sheet.mergeCells(`A${statsRow + 3}:J${statsRow + 3}`);
   const legendCell = sheet.getCell(`A${statsRow + 3}`);
   legendCell.value =
-    'Rouge = sous objectif • Jaune = objectif atteint mais gros objectif non atteint • Vert = gros objectif atteint';
+    'Rouge = moins de l'objectif • Sans couleur = entre objectif et moitié du gros objectif • Bleu = moitié du gros objectif atteinte • Vert = gros objectif atteint';
   legendCell.font = { color: { argb: 'FF64748B' }, italic: true, size: 10 };
 }
 
