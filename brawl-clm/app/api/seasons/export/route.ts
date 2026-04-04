@@ -110,6 +110,19 @@ function formatDateTime(value?: string | null) {
   }).format(date);
 }
 
+function formatDateOnly(value?: string | null) {
+  if (!value) return '--';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '--';
+
+  return new Intl.DateTimeFormat('fr-FR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    timeZone: 'Europe/Paris',
+  }).format(date);
+}
+
 function roleRank(role: string) {
   if (role === 'Président') return 0;
   if (role === 'Vice-président') return 1;
@@ -148,7 +161,8 @@ function getFillForStatus(status: 'bad' | 'neutral' | 'blue' | 'good') {
   return undefined;
 }
 
-function getMemberStatusLabel(status?: string | null) {
+function getMemberStatusLabel(status?: string | null, isNew?: boolean, joinedAt?: string | null) {
+  if (isNew) return `Nouveau - arrivé le ${formatDateOnly(joinedAt)}`;
   if (status === 'left') return 'Ex-membre';
   if (status === 'inactive') return 'Inactif';
   return 'Actif';
@@ -217,7 +231,7 @@ function addClubSheet(
   sheet.columns = [
     { key: 'name', width: 24 },
     { key: 'role', width: 18 },
-    { key: 'memberStatus', width: 14 },
+    { key: 'memberStatus', width: 28 },
     { key: 'start', width: 16 },
     { key: 'end', width: 16 },
     { key: 'push', width: 14 },
@@ -312,7 +326,7 @@ function addClubSheet(
 
     row.getCell(1).value = entry.player_name;
     row.getCell(2).value = entry.role;
-    row.getCell(3).value = getMemberStatusLabel(entry.status);
+    row.getCell(3).value = getMemberStatusLabel(entry.status, (entry as any).is_new, (entry as any).joined_at);
     row.getCell(4).value = start;
     row.getCell(5).value = end;
     row.getCell(6).value = push;
