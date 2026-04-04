@@ -1,4 +1,4 @@
-const baseUrl = 'https://api.brawlstars.com/v1';
+const baseUrl = 'https://bsproxy.royaleapi.dev/v1';
 
 export type BrawlClubMember = {
   tag: string;
