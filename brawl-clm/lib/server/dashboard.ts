@@ -86,6 +86,32 @@ function actorLabel(actor?: StaffActor) {
   return actor.displayName?.trim() || actor.email || actor.userId;
 }
 
+const NEW_BADGE_BASELINE_AT = new Date('2026-04-04T00:00:00.000Z').getTime();
+const NEW_BADGE_WINDOW_MS = 15 * 24 * 60 * 60 * 1000;
+const FIRST_JOIN_TOLERANCE_MS = 24 * 60 * 60 * 1000;
+
+function getNewBadgeMeta(membershipCreatedAtRaw?: string | null, personCreatedAtRaw?: string | null) {
+  const membershipCreatedAt = membershipCreatedAtRaw ? new Date(membershipCreatedAtRaw) : null;
+  const personCreatedAt = personCreatedAtRaw ? new Date(personCreatedAtRaw) : null;
+
+  const membershipTime = membershipCreatedAt?.getTime() ?? NaN;
+  const personTime = personCreatedAt?.getTime() ?? NaN;
+
+  const hasMembershipDate = Number.isFinite(membershipTime);
+  const hasPersonDate = Number.isFinite(personTime);
+  const isRecentMembership = hasMembershipDate && Date.now() - membershipTime <= NEW_BADGE_WINDOW_MS;
+  const isFirstJoinWindow =
+    hasMembershipDate &&
+    hasPersonDate &&
+    Math.abs(membershipTime - personTime) <= FIRST_JOIN_TOLERANCE_MS;
+  const isAfterBaseline = hasMembershipDate && membershipTime >= NEW_BADGE_BASELINE_AT;
+
+  return {
+    isNew: Boolean(isRecentMembership && isFirstJoinWindow && isAfterBaseline),
+    joinedAt: hasMembershipDate ? membershipCreatedAtRaw ?? null : null,
+  };
+}
+
 async function insertAdminLog(input: {
   entityType: string;
   entityId?: string | null;
@@ -204,18 +230,7 @@ export async function getPlayersForSeasonServer(seasonId: string): Promise<Playe
   return (data ?? [])
     .filter((row: any) => isVisibleDashboardStatus(row.status))
     .map((row: any) => {
-      const membershipCreatedAt = row.created_at ? new Date(row.created_at) : null;
-      const personCreatedAt = row.person?.created_at ? new Date(row.person.created_at) : null;
-      const isRecentMembership =
-        membershipCreatedAt instanceof Date &&
-        !Number.isNaN(membershipCreatedAt.getTime()) &&
-        Date.now() - membershipCreatedAt.getTime() <= 15 * 24 * 60 * 60 * 1000;
-      const isFirstJoinWindow =
-        membershipCreatedAt instanceof Date &&
-        personCreatedAt instanceof Date &&
-        !Number.isNaN(membershipCreatedAt.getTime()) &&
-        !Number.isNaN(personCreatedAt.getTime()) &&
-        Math.abs(membershipCreatedAt.getTime() - personCreatedAt.getTime()) <= 24 * 60 * 60 * 1000;
+      const newBadgeMeta = getNewBadgeMeta(row.created_at, row.person?.created_at);
 
       return {
         id: row.id,
@@ -229,7 +244,7 @@ export async function getPlayersForSeasonServer(seasonId: string): Promise<Playe
         notes: row.internal_notes ?? '',
         lastSeen: formatLastSeen(row.last_seen_at),
         seasonHistory: [],
-        isNew: Boolean(isRecentMembership && isFirstJoinWindow),
+        isNew: newBadgeMeta.isNew,
       };
     });
 }
@@ -297,26 +312,45 @@ export async function exportSeasonRowsServer(seasonId: string) {
     .order('club_name', { ascending: true });
   if (error) throw error;
 
-  return (data ?? []).map((row: any) => ({
-    membership_id: row.membership_id,
-    season_id: row.season_id,
-    club_id: row.club_id,
-    club_name: row.club_name ?? 'Club inconnu',
-    player_id: row.person_id,
-    player_name: row.display_name || row.game_name || 'Joueur inconnu',
-    role: row.role === 'president' ? 'Président' : row.role === 'vice_president' ? 'Vice-président' : 'Membre',
-    trophies_start: Number(row.trophies_start ?? 0),
-    trophies_live: Number(row.current_trophies ?? row.trophies_end ?? 0),
-    trophies_end: Number(row.trophies_end ?? 0),
-    peak_trophies: Number(row.peak_trophies ?? 0),
-    trophies_push: Number(row.trophies_push ?? 0),
-    notes: row.internal_notes ?? '',
-    objective_trophies: Number(row.objective_trophies ?? 0),
-    big_objective_trophies: Number(row.big_objective_trophies ?? 0),
-    objective_points: Number(row.objective_points ?? 0),
-    game_tag: row.game_tag ?? '',
-    status: (row.status ?? 'active') as MembershipStatus,
-  }));
+  const { data: membershipMetaRows, error: membershipMetaError } = await client
+    .from('memberships')
+    .select(`id,created_at,person:persons(created_at)`)
+    .eq('season_id', seasonId);
+  if (membershipMetaError) throw membershipMetaError;
+
+  const membershipMeta = new Map(
+    (membershipMetaRows ?? []).map((row: any) => {
+      const meta = getNewBadgeMeta(row.created_at, row.person?.created_at);
+      return [row.id, meta] as const;
+    }),
+  );
+
+  return (data ?? []).map((row: any) => {
+    const meta = membershipMeta.get(row.membership_id) ?? { isNew: false, joinedAt: null };
+
+    return {
+      membership_id: row.membership_id,
+      season_id: row.season_id,
+      club_id: row.club_id,
+      club_name: row.club_name ?? 'Club inconnu',
+      player_id: row.person_id,
+      player_name: row.display_name || row.game_name || 'Joueur inconnu',
+      role: row.role === 'president' ? 'Président' : row.role === 'vice_president' ? 'Vice-président' : 'Membre',
+      trophies_start: Number(row.trophies_start ?? 0),
+      trophies_live: Number(row.current_trophies ?? row.trophies_end ?? 0),
+      trophies_end: Number(row.trophies_end ?? 0),
+      peak_trophies: Number(row.peak_trophies ?? 0),
+      trophies_push: Number(row.trophies_push ?? 0),
+      notes: row.internal_notes ?? '',
+      objective_trophies: Number(row.objective_trophies ?? 0),
+      big_objective_trophies: Number(row.big_objective_trophies ?? 0),
+      objective_points: Number(row.objective_points ?? 0),
+      game_tag: row.game_tag ?? '',
+      status: (row.status ?? 'active') as MembershipStatus,
+      is_new: meta.isNew,
+      joined_at: meta.joinedAt,
+    };
+  });
 }
 
 export async function loadDashboardDataServer() {
