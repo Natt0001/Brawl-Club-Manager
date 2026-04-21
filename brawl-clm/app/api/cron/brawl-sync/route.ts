@@ -1,17 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { syncBrawlDataForActiveSeason } from '@/lib/brawl-stars/sync';
 
-export async function GET(req: NextRequest) {
-  const secret = process.env.CRON_SECRET;
+export const dynamic = 'force-dynamic';
 
-  if (req.headers.get('authorization') !== `Bearer ${secret}`) {
-    return NextResponse.json({ ok: false }, { status: 401 });
+function isAuthorized(request: NextRequest) {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) return false;
+  const header = request.headers.get('authorization');
+  return header === `Bearer ${cronSecret}`;
+}
+
+export async function GET(request: NextRequest) {
+  if (!isAuthorized(request)) {
+    return NextResponse.json({ ok: false, error: 'Unauthorized cron call' }, { status: 401 });
   }
 
   try {
-    await syncBrawlDataForActiveSeason();
-    return NextResponse.json({ ok: true });
-  } catch (e) {
-    return NextResponse.json({ ok: false }, { status: 500 });
+    const summary = await syncBrawlDataForActiveSeason();
+    return NextResponse.json({ ok: true, summary });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown cron sync error';
+    return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
