@@ -45,6 +45,11 @@ export type StaffMe = {
   email: string | null;
   canModerate: boolean;
 };
+export type SyncStatus = {
+  lastSyncAt: string | null;
+  nextScheduledSyncAt: string | null;
+  syncIntervalMinutes: number;
+};
 
 export async function getAuthHeaders(): Promise<Record<string, string>> {
   if (!supabase) return {};
@@ -105,6 +110,7 @@ export async function loadDashboardData() {
     logs: AdminLogEntry[];
     trophiesRanking: RankingTrophiesRow[];
     pointsRanking: RankingPointsRow[];
+    syncStatus: SyncStatus;
   }>(`/api/dashboard?t=${Date.now()}`);
 }
 
