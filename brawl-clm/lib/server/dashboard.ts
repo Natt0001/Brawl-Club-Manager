@@ -42,7 +42,7 @@ export type RankingPointsRow = { membershipId: string; playerName: string; role:
 export type SyncStatus = {
   lastSyncAt: string | null;
   nextScheduledSyncAt: string | null;
-  syncIntervalMinutes: number;
+  syncIntervalMinutes: number | null;
 };
 
 type MembershipStatus = 'active' | 'inactive' | 'left';
@@ -115,6 +115,28 @@ function getNewBadgeMeta(membershipCreatedAtRaw?: string | null, personCreatedAt
     isNew: Boolean(isRecentMembership && isFirstJoinWindow && isAfterBaseline),
     joinedAt: hasMembershipDate ? membershipCreatedAtRaw ?? null : null,
   };
+}
+
+function getNextDailyCronUtc(hourUtc: number, minuteUtc: number) {
+  const now = new Date();
+
+  const next = new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      hourUtc,
+      minuteUtc,
+      0,
+      0,
+    ),
+  );
+
+  if (next.getTime() <= now.getTime()) {
+    next.setUTCDate(next.getUTCDate() + 1);
+  }
+
+  return next.toISOString();
 }
 
 async function insertAdminLog(input: {
@@ -358,7 +380,7 @@ export async function exportSeasonRowsServer(seasonId: string) {
   });
 }
 
-export async function getSyncStatusServer(syncIntervalMinutes = 30): Promise<SyncStatus> {
+export async function getSyncStatusServer(): Promise<SyncStatus> {
   const client = getSupabaseServerClient();
   const { data, error } = await client
     .from('admin_logs')
@@ -372,14 +394,11 @@ export async function getSyncStatusServer(syncIntervalMinutes = 30): Promise<Syn
   if (error) throw error;
 
   const lastSyncAt = data?.created_at ?? null;
-  const nextScheduledSyncAt = lastSyncAt
-    ? new Date(new Date(lastSyncAt).getTime() + syncIntervalMinutes * 60 * 1000).toISOString()
-    : null;
 
   return {
     lastSyncAt,
-    nextScheduledSyncAt,
-    syncIntervalMinutes,
+    nextScheduledSyncAt: getNextDailyCronUtc(10, 0),
+    syncIntervalMinutes: null,
   };
 }
 
@@ -391,7 +410,7 @@ export async function loadDashboardDataServer() {
     getAdminLogsServer(20),
     getTrophiesRankingServer(activeSeason.id, 10),
     getPointsRankingServer(activeSeason.id, 50),
-    getSyncStatusServer(30),
+    getSyncStatusServer(),
   ]);
 
   return { activeSeason, clubs, players, logs, trophiesRanking, pointsRanking, syncStatus };
