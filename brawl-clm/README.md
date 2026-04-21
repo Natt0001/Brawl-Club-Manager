@@ -1,4 +1,4 @@
-# Brawl Club Manager
+# Brawl Club Manager 
 
 Projet Next.js + Supabase pour gérer votre organisation Brawl Stars.
 
