@@ -21,6 +21,8 @@ import {
   StickyNote,
   Lock,
   LogOut,
+  Clock3,
+  RefreshCcw,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -46,6 +48,7 @@ import {
   type Player,
   type AdminLogEntry,
   type StaffMe,
+  type SyncStatus,
 } from '@/lib/supabase/repository';
 
 const MOCK_CLUBS: Club[] = [
@@ -805,6 +808,12 @@ export function BrawlClubManagerApp() {
   const [staffPseudoDraft, setStaffPseudoDraft] = useState('');
   const [staffAuthLoading, setStaffAuthLoading] = useState(false);
   const [savingStaffPseudo, setSavingStaffPseudo] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>({
+    lastSyncAt: null,
+    nextScheduledSyncAt: null,
+    syncIntervalMinutes: 30,
+  });
+  const [nowTs, setNowTs] = useState(() => Date.now());
 
   const refresh = async () => {
     if (!hasSupabaseEnv) return;
@@ -817,6 +826,7 @@ export function BrawlClubManagerApp() {
       setClubs(data.clubs);
       setPlayers(data.players);
       setLogs(data.logs);
+      setSyncStatus(data.syncStatus);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Erreur de chargement');
     } finally {
@@ -859,6 +869,49 @@ export function BrawlClubManagerApp() {
       subscription.unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNowTs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  const formatSyncDateTime = (value?: string | null) => {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '—';
+    return date.toLocaleString('fr-FR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZone: 'Europe/Paris',
+    });
+  };
+
+  const getRemainingSyncLabel = (value?: string | null) => {
+    if (!value) return 'planification en attente';
+    const targetTs = new Date(value).getTime();
+    if (Number.isNaN(targetTs)) return 'planification en attente';
+
+    const diff = targetTs - nowTs;
+    if (diff <= 0) return 'sync imminente';
+
+    const totalSeconds = Math.ceil(diff / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}min`;
+    if (minutes > 0) return `${minutes}min ${String(seconds).padStart(2, '0')}s`;
+    return `${seconds}s`;
+  };
 
   const formatSeasonDate = (value?: string | null, options?: { hideIfActive?: boolean }) => {
     if (options?.hideIfActive && activeSeason?.status === 'active') return '—';
@@ -1170,35 +1223,57 @@ export function BrawlClubManagerApp() {
               <h1 className="break-words text-4xl font-black tracking-tight text-white sm:text-5xl">Gestion des clubs</h1>
             </div>
 
-            <div className={`grid w-full gap-3 ${isAdminMode ? 'sm:grid-cols-6 lg:w-[1100px]' : 'sm:grid-cols-4 lg:w-[820px]'}`}>
-              {isAdminMode && (
+            <div className={`grid w-full gap-3 ${canModerate ? (isAdminMode ? 'sm:grid-cols-6 lg:w-[1100px]' : 'sm:grid-cols-4 lg:w-[820px]') : 'sm:grid-cols-3 lg:w-[820px]'}`}>
+              {canModerate ? (
                 <>
-                  <Button variant="outline" onClick={() => setLogsOpen(true)} disabled={!canModerate}>
-                    <ScrollText className="mr-2 h-4 w-4" />Logs
+                  {isAdminMode && (
+                    <>
+                      <Button variant="outline" onClick={() => setLogsOpen(true)} disabled={!canModerate}>
+                        <ScrollText className="mr-2 h-4 w-4" />Logs
+                      </Button>
+                      <Button variant="outline" onClick={() => setSeasonDangerOpen(true)} disabled={!canModerate}>
+                        <History className="mr-2 h-4 w-4" />Clôturer / ouvrir
+                      </Button>
+                    </>
+                  )}
+                  <Button variant="outline" onClick={() => void handleExportSeason()} disabled={!canModerate || exportingSeason}>
+                    <FileSpreadsheet className="mr-2 h-4 w-4" />{exportingSeason ? 'Export...' : 'Export saison'}
                   </Button>
-                  <Button variant="outline" onClick={() => setSeasonDangerOpen(true)} disabled={!canModerate}>
-                    <History className="mr-2 h-4 w-4" />Clôturer / ouvrir
+                  <Button variant="outline" onClick={() => void handleSyncBrawl()} disabled={!canModerate || syncing}>
+                    {syncing ? <><span>Sync</span><LoadingDots /></> : 'Sync Brawl Stars'}
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      if (!canModerate) return;
+                      setIsAdminMode((prev) => !prev);
+                    }}
+                    disabled={!canModerate}
+                    variant="outline"
+                    className={isAdminMode ? 'border-orange-500/20 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20' : ''}
+                  >
+                    <Shield className="mr-2 h-4 w-4" />
+                    {isAdminMode ? 'Mode admin activé' : 'Mode modération'}
                   </Button>
                 </>
+              ) : (
+                <>
+                  <div className="flex min-h-20 flex-col justify-center rounded-[1.6rem] border border-white/10 bg-white/[0.04] px-4 py-3 text-left shadow-lg backdrop-blur-xl">
+                    <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-zinc-200">
+                      <Clock3 className="h-4 w-4 text-orange-300" />
+                      Dernière sync
+                    </div>
+                    <p className="text-sm text-zinc-300">{formatSyncDateTime(syncStatus.lastSyncAt)}</p>
+                  </div>
+
+                  <div className="flex min-h-20 flex-col justify-center rounded-[1.6rem] border border-white/10 bg-white/[0.04] px-4 py-3 text-left shadow-lg backdrop-blur-xl">
+                    <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-zinc-200">
+                      <RefreshCcw className="h-4 w-4 text-emerald-300" />
+                      Prochaine sync auto
+                    </div>
+                    <p className="text-sm text-zinc-300">dans {getRemainingSyncLabel(syncStatus.nextScheduledSyncAt)}</p>
+                  </div>
+                </>
               )}
-              <Button variant="outline" onClick={() => void handleExportSeason()} disabled={!canModerate || exportingSeason}>
-                <FileSpreadsheet className="mr-2 h-4 w-4" />{exportingSeason ? 'Export...' : 'Export saison'}
-              </Button>
-              <Button variant="outline" onClick={() => void handleSyncBrawl()} disabled={!canModerate || syncing}>
-                {syncing ? <><span>Sync</span><LoadingDots /></> : 'Sync Brawl Stars'}
-              </Button>
-              <Button
-                onClick={() => {
-                  if (!canModerate) return;
-                  setIsAdminMode((prev) => !prev);
-                }}
-                disabled={!canModerate}
-                variant="outline"
-                className={isAdminMode ? 'border-orange-500/20 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20' : ''}
-              >
-                <Shield className="mr-2 h-4 w-4" />
-                {isAdminMode ? 'Mode admin activé' : 'Mode modération'}
-              </Button>
               {staffMe?.isLoggedIn ? (
                 <Button variant="outline" onClick={() => void handleStaffLogout()} disabled={staffAuthLoading}>
                   <LogOut className="mr-2 h-4 w-4" />{staffAuthLoading ? 'Sortie...' : `${staffRoleLabel} • ${staffMe.displayName ?? 'Staff'}`}
