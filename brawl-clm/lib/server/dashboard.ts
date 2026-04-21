@@ -39,6 +39,11 @@ export type SeasonOption = {
 };
 export type RankingTrophiesRow = { membershipId: string; playerName: string; role: Player['role']; clubName: string; trophiesPush: number };
 export type RankingPointsRow = { membershipId: string; playerName: string; role: Player['role']; clubName: string; points: number; trophiesPush: number };
+export type SyncStatus = {
+  lastSyncAt: string | null;
+  nextScheduledSyncAt: string | null;
+  syncIntervalMinutes: number;
+};
 
 type MembershipStatus = 'active' | 'inactive' | 'left';
 
@@ -353,17 +358,43 @@ export async function exportSeasonRowsServer(seasonId: string) {
   });
 }
 
+export async function getSyncStatusServer(syncIntervalMinutes = 30): Promise<SyncStatus> {
+  const client = getSupabaseServerClient();
+  const { data, error } = await client
+    .from('admin_logs')
+    .select('created_at')
+    .eq('entity_type', 'brawl_sync')
+    .eq('action', 'sync')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+
+  const lastSyncAt = data?.created_at ?? null;
+  const nextScheduledSyncAt = lastSyncAt
+    ? new Date(new Date(lastSyncAt).getTime() + syncIntervalMinutes * 60 * 1000).toISOString()
+    : null;
+
+  return {
+    lastSyncAt,
+    nextScheduledSyncAt,
+    syncIntervalMinutes,
+  };
+}
+
 export async function loadDashboardDataServer() {
   const activeSeason = await getActiveSeasonServer();
-  const [clubs, players, logs, trophiesRanking, pointsRanking] = await Promise.all([
+  const [clubs, players, logs, trophiesRanking, pointsRanking, syncStatus] = await Promise.all([
     getClubsForSeasonServer(activeSeason.id),
     getPlayersForSeasonServer(activeSeason.id),
     getAdminLogsServer(20),
     getTrophiesRankingServer(activeSeason.id, 10),
     getPointsRankingServer(activeSeason.id, 50),
+    getSyncStatusServer(30),
   ]);
 
-  return { activeSeason, clubs, players, logs, trophiesRanking, pointsRanking };
+  return { activeSeason, clubs, players, logs, trophiesRanking, pointsRanking, syncStatus };
 }
 
 export async function saveClubSettingsServer(
