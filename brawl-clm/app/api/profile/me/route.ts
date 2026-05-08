@@ -15,7 +15,8 @@ export async function GET(request: NextRequest) {
         role: staff?.role ?? 'viewer',
         displayName: staff?.displayName ?? null,
         email: staff?.email ?? null,
-        canModerate: staff ? ['owner', 'moderator'].includes(staff.role) : false,
+        canModerate: staff ? ['owner', 'admin', 'moderator', 'staff_bp'].includes(staff.role) : false,
+        canManagePoints: staff ? ['owner', 'staff_bp'].includes(staff.role) : false,
       },
     });
   } catch (error) {
