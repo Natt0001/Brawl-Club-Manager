@@ -40,6 +40,8 @@ import {
   syncBrawlStars,
   closeAndOpenNextSeason,
   saveSeason,
+  adjustPlayerPoints,
+  saveSeasonHistorySnapshot,
   getStaffMe,
   signInStaffWithGoogle,
   signOutStaff,
@@ -49,6 +51,7 @@ import {
   type AdminLogEntry,
   type StaffMe,
   type SyncStatus,
+  type SeasonHistorySnapshot,
 } from '@/lib/supabase/repository';
 
 const MOCK_CLUBS: Club[] = [
@@ -137,6 +140,17 @@ function calculatePoints(push: number, objective: number, bigObjective: number) 
   if (bigObjective > 0 && push >= bigObjective) return 3;
   if (bigObjective > 0 && push >= bigObjective / 2) return 1;
   return 0;
+}
+
+function calculatePlayerPoints(player: Player, club: Club) {
+  return calculatePoints(calculatePush(player.current, player.end), club.objective, club.bigObjective) + (player.pointsAdjustment ?? 0);
+}
+
+function formatHistoryDate(value?: string | null) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Paris' });
 }
 
 type TrophiesDisplayRow = {
@@ -433,7 +447,7 @@ function PlayerEditDialog({
   if (!draft || !club) return null;
 
   const push = calculatePush(draft.current, draft.end);
-  const points = calculatePoints(push, club.objective, club.bigObjective);
+  const points = calculatePlayerPoints(draft, club);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -534,7 +548,7 @@ function PlayerDetailDialog({
   if (!player || !club) return null;
 
   const push = calculatePush(player.current, player.end);
-  const points = calculatePoints(push, club.objective, club.bigObjective);
+  const points = calculatePlayerPoints(player, club);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -780,6 +794,197 @@ function StaffDisplayNameDialog({
   );
 }
 
+
+function PointAdjustmentDialog({
+  player,
+  club,
+  open,
+  onOpenChange,
+  onSave,
+}: {
+  player: Player | null;
+  club?: Club;
+  open: boolean;
+  onOpenChange: (value: boolean) => void;
+  onSave: (deltaPoints: number, reason: string) => Promise<void> | void;
+}) {
+  const [delta, setDelta] = useState('');
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) {
+      setDelta('');
+      setReason('');
+    }
+  }, [open]);
+
+  if (!player || !club) return null;
+  const push = calculatePush(player.current, player.end);
+  const basePoints = calculatePoints(push, club.objective, club.bigObjective);
+  const adjustment = player.pointsAdjustment ?? 0;
+  const totalPoints = basePoints + adjustment;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Modifier les points • {player.name}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-zinc-300">
+            <p>Club : <span className="font-medium text-white">{club.name}</span></p>
+            <p className="mt-2">Points objectif : <span className="font-medium text-white">{basePoints}</span></p>
+            <p className="mt-1">Ajustement manuel : <span className={adjustment >= 0 ? 'font-medium text-emerald-300' : 'font-medium text-red-300'}>{adjustment >= 0 ? '+' : ''}{adjustment}</span></p>
+            <p className="mt-1">Total actuel : <span className="font-bold text-orange-300">{totalPoints} pts</span></p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-zinc-400">Ajouter / enlever des points</label>
+            <Input value={delta} onChange={(event) => setDelta(event.target.value)} placeholder="Ex : 2 ou -1" />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-zinc-400">Raison visible dans les logs</label>
+            <Input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Ex : correction pari / bonus tournoi" />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Annuler</Button>
+          <Button
+            onClick={async () => {
+              const value = Number(delta.replace(',', '.'));
+              if (!Number.isFinite(value) || value === 0) return;
+              setSaving(true);
+              try {
+                await onSave(value, reason);
+                onOpenChange(false);
+              } finally {
+                setSaving(false);
+              }
+            }}
+            disabled={saving || !Number.isFinite(Number(delta.replace(',', '.'))) || Number(delta.replace(',', '.')) === 0}
+          >
+            {saving ? 'Modification...' : 'Valider'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function SeasonHistoryEditDialog({
+  open,
+  onOpenChange,
+  history,
+  onSave,
+}: {
+  open: boolean;
+  onOpenChange: (value: boolean) => void;
+  history: SeasonHistorySnapshot | null;
+  onSave: (history: SeasonHistorySnapshot) => Promise<void> | void;
+}) {
+  const [draft, setDraft] = useState<SeasonHistorySnapshot | null>(history);
+  const [leadersJson, setLeadersJson] = useState('[]');
+  const [tournamentsJson, setTournamentsJson] = useState('[]');
+  const [saving, setSaving] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setDraft(history);
+      setLeadersJson(JSON.stringify(history?.clubLeaders ?? [], null, 2));
+      setTournamentsJson(JSON.stringify(history?.tournamentWinners ?? [], null, 2));
+      setLocalError(null);
+    }
+  }, [open, history]);
+
+  if (!draft) return null;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Modifier l'historique de saison</DialogTitle>
+        </DialogHeader>
+        <div className="max-h-[70vh] space-y-4 overflow-y-auto pr-1">
+          {localError && <div className="rounded-2xl border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{localError}</div>}
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <p className="mb-2 text-sm text-zinc-400">Nom</p>
+              <Input value={draft.seasonName} onChange={(event) => setDraft({ ...draft, seasonName: event.target.value })} />
+            </div>
+            <div>
+              <p className="mb-2 text-sm text-zinc-400">Numéro</p>
+              <Input value={draft.seasonNumber ?? ''} onChange={(event) => setDraft({ ...draft, seasonNumber: Number(event.target.value) || null })} />
+            </div>
+            <div>
+              <p className="mb-2 text-sm text-zinc-400">Début</p>
+              <Input value={draft.startsAt ?? ''} onChange={(event) => setDraft({ ...draft, startsAt: event.target.value || null })} />
+            </div>
+            <div>
+              <p className="mb-2 text-sm text-zinc-400">Fin</p>
+              <Input value={draft.endsAt ?? ''} onChange={(event) => setDraft({ ...draft, endsAt: event.target.value || null })} />
+            </div>
+            <div>
+              <p className="mb-2 text-sm text-zinc-400">Nombre de membres</p>
+              <Input value={draft.membersCount} onChange={(event) => setDraft({ ...draft, membersCount: Number(event.target.value) || 0 })} />
+            </div>
+            <div>
+              <p className="mb-2 text-sm text-zinc-400">Push total</p>
+              <Input value={draft.totalPush} onChange={(event) => setDraft({ ...draft, totalPush: Number(event.target.value) || 0 })} />
+            </div>
+            <div>
+              <p className="mb-2 text-sm text-zinc-400">Clan top push</p>
+              <Input value={draft.topClubName ?? ''} onChange={(event) => setDraft({ ...draft, topClubName: event.target.value || null })} />
+            </div>
+            <div>
+              <p className="mb-2 text-sm text-zinc-400">Push du clan top</p>
+              <Input value={draft.topClubPush} onChange={(event) => setDraft({ ...draft, topClubPush: Number(event.target.value) || 0 })} />
+            </div>
+          </div>
+          <div>
+            <p className="mb-2 text-sm text-zinc-400">Premiers de chaque club (JSON)</p>
+            <textarea
+              value={leadersJson}
+              onChange={(event) => setLeadersJson(event.target.value)}
+              className="min-h-[150px] w-full resize-y rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-mono text-xs text-white outline-none"
+            />
+          </div>
+          <div>
+            <p className="mb-2 text-sm text-zinc-400">Vainqueurs tournois futurs (JSON)</p>
+            <textarea
+              value={tournamentsJson}
+              onChange={(event) => setTournamentsJson(event.target.value)}
+              className="min-h-[120px] w-full resize-y rounded-2xl border border-white/10 bg-white/5 px-4 py-3 font-mono text-xs text-white outline-none"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Annuler</Button>
+          <Button
+            onClick={async () => {
+              setSaving(true);
+              setLocalError(null);
+              try {
+                const clubLeaders = JSON.parse(leadersJson);
+                const tournamentWinners = JSON.parse(tournamentsJson);
+                await onSave({ ...draft, clubLeaders, tournamentWinners });
+                onOpenChange(false);
+              } catch (error) {
+                setLocalError(error instanceof Error ? error.message : 'JSON invalide');
+              } finally {
+                setSaving(false);
+              }
+            }}
+            disabled={saving}
+          >
+            {saving ? 'Enregistrement...' : 'Enregistrer'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function BrawlClubManagerApp() {
   const [clubs, setClubs] = useState<Club[]>(MOCK_CLUBS);
   const [players, setPlayers] = useState<Player[]>(MOCK_PLAYERS);
@@ -802,6 +1007,10 @@ export function BrawlClubManagerApp() {
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [seasonDangerOpen, setSeasonDangerOpen] = useState(false);
   const [seasonEditOpen, setSeasonEditOpen] = useState(false);
+  const [seasonHistory, setSeasonHistory] = useState<SeasonHistorySnapshot | null>(null);
+  const [seasonHistoryEditOpen, setSeasonHistoryEditOpen] = useState(false);
+  const [pointSearch, setPointSearch] = useState('');
+  const [pointDialogPlayerId, setPointDialogPlayerId] = useState<string | null>(null);
   const [staffMe, setStaffMe] = useState<StaffMe | null>(null);
   const [staffLoginOpen, setStaffLoginOpen] = useState(false);
   const [staffPseudoOpen, setStaffPseudoOpen] = useState(false);
@@ -811,7 +1020,7 @@ export function BrawlClubManagerApp() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({
     lastSyncAt: null,
     nextScheduledSyncAt: null,
-    syncIntervalMinutes: 30,
+    syncIntervalMinutes: null,
   });
   const [nowTs, setNowTs] = useState(() => Date.now());
 
@@ -827,6 +1036,7 @@ export function BrawlClubManagerApp() {
       setPlayers(data.players);
       setLogs(data.logs);
       setSyncStatus(data.syncStatus);
+      setSeasonHistory(data.seasonHistory);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Erreur de chargement');
     } finally {
@@ -846,7 +1056,7 @@ export function BrawlClubManagerApp() {
         setStaffPseudoOpen(false);
       }
     } catch {
-      setStaffMe({ isLoggedIn: false, role: 'viewer', displayName: null, email: null, canModerate: false });
+      setStaffMe({ isLoggedIn: false, role: 'viewer', displayName: null, email: null, canModerate: false, canManagePoints: false });
       setStaffPseudoOpen(false);
     }
   };
@@ -927,7 +1137,8 @@ export function BrawlClubManagerApp() {
   };
 
   const canModerate = staffMe?.canModerate === true;
-  const staffRoleLabel = staffMe?.role === 'owner' ? 'Owner' : staffMe?.role === 'moderator' ? 'Modo' : 'Visiteur';
+  const canManagePoints = staffMe?.canManagePoints === true;
+  const staffRoleLabel = staffMe?.role === 'owner' ? 'Owner' : staffMe?.role === 'staff_bp' ? 'Staff BP' : staffMe?.role === 'moderator' ? 'Modo' : staffMe?.role === 'admin' ? 'Admin' : 'Visiteur';
 
   const filteredPlayers = useMemo(() => {
     const normalizedSearch = normalizeForSearch(search);
@@ -949,6 +1160,8 @@ export function BrawlClubManagerApp() {
   const editingClub = clubs.find((club) => club.id === editingClubId) ?? null;
   const editingPlayerClub = editingPlayer ? clubs.find((club) => club.id === editingPlayer.clubId) : undefined;
   const detailPlayerClub = detailPlayer ? clubs.find((club) => club.id === detailPlayer.clubId) : undefined;
+  const pointDialogPlayer = players.find((player) => player.id === pointDialogPlayerId) ?? null;
+  const pointDialogClub = pointDialogPlayer ? clubs.find((club) => club.id === pointDialogPlayer.clubId) : undefined;
 
   const stats = useMemo(
     () => ({
@@ -956,7 +1169,7 @@ export function BrawlClubManagerApp() {
       totalPush: players.reduce((acc, player) => acc + calculatePush(player.current, player.end), 0),
       totalPoints: players.reduce((acc, player) => {
         const club = clubs.find((item) => item.id === player.clubId);
-        return acc + (club ? calculatePoints(calculatePush(player.current, player.end), club.objective, club.bigObjective) : 0);
+        return acc + (club ? calculatePlayerPoints(player, club) : 0);
       }, 0),
       inactiveCount: players.filter((player) => !player.active).length,
     }),
@@ -968,7 +1181,7 @@ export function BrawlClubManagerApp() {
       .map((club) => {
         const clubPlayers = players.filter((player) => player.clubId === club.id);
         const totalPush = clubPlayers.reduce((acc, player) => acc + calculatePush(player.current, player.end), 0);
-        const totalPoints = clubPlayers.reduce((acc, player) => acc + calculatePoints(calculatePush(player.current, player.end), club.objective, club.bigObjective), 0);
+        const totalPoints = clubPlayers.reduce((acc, player) => acc + calculatePlayerPoints(player, club), 0);
         return { ...club, score: totalPush + totalPoints * 500 };
       })
       .sort((a, b) => b.score - a.score)[0],
@@ -994,8 +1207,8 @@ export function BrawlClubManagerApp() {
     return rankingClubFilter === 'all' ? rows.slice(0, 10) : rows;
   }, [players, clubs, rankingClubFilter]);
 
-  const displayedPointsRanking = useMemo<PointsDisplayRow[]>(() => {
-    const rows = players
+  const allPointsRanking = useMemo<PointsDisplayRow[]>(() => {
+    return players
       .map((player) => {
         const club = clubs.find((item) => item.id === player.clubId);
         const trophiesPush = calculatePush(player.current, player.end);
@@ -1006,15 +1219,26 @@ export function BrawlClubManagerApp() {
           role: player.role,
           clubName: club?.name ?? '—',
           clubId: player.clubId,
-          points: club ? calculatePoints(trophiesPush, club.objective, club.bigObjective) : 0,
+          points: club ? calculatePlayerPoints(player, club) : 0,
           trophiesPush,
         };
       })
       .filter((row) => rankingClubFilter === 'all' || row.clubId === rankingClubFilter)
       .sort((a, b) => b.points - a.points || b.trophiesPush - a.trophiesPush);
-
-    return rankingClubFilter === 'all' ? rows.slice(0, 10) : rows;
   }, [players, clubs, rankingClubFilter]);
+
+  const displayedPointsRanking = useMemo<PointsDisplayRow[]>(() => {
+    return rankingClubFilter === 'all' ? allPointsRanking.slice(0, 10) : allPointsRanking;
+  }, [allPointsRanking, rankingClubFilter]);
+
+  const pointsManagementRows = useMemo<PointsDisplayRow[]>(() => {
+    const normalizedSearch = normalizeForSearch(pointSearch);
+    return allPointsRanking.filter((row) => {
+      if (!normalizedSearch) return true;
+      return normalizeForSearch(`${row.playerName} ${row.clubName} ${row.role}`).includes(normalizedSearch);
+    });
+  }, [allPointsRanking, pointSearch]);
+
 
   const handleSaveClub = async (club: Club) => {
     if (!canModerate) return;
@@ -1175,7 +1399,7 @@ export function BrawlClubManagerApp() {
     try {
       await signOutStaff();
       setIsAdminMode(false);
-      setStaffMe({ isLoggedIn: false, role: 'viewer', displayName: null, email: null, canModerate: false });
+      setStaffMe({ isLoggedIn: false, role: 'viewer', displayName: null, email: null, canModerate: false, canManagePoints: false });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Erreur de déconnexion');
     } finally {
@@ -1197,6 +1421,35 @@ export function BrawlClubManagerApp() {
       setError(e instanceof Error ? e.message : "Erreur d'enregistrement du pseudo");
     } finally {
       setSavingStaffPseudo(false);
+    }
+  };
+
+  const handleAdjustPlayerPoints = async (membershipId: string, deltaPoints: number, reason: string) => {
+    if (!canManagePoints || !seasonId) return;
+    setError(null);
+    setSyncMessage(null);
+    try {
+      await adjustPlayerPoints({ seasonId, membershipId, deltaPoints, reason });
+      await refresh();
+      const sign = deltaPoints > 0 ? '+' : '';
+      setSyncMessage(`Points modifiés : ${sign}${deltaPoints}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Erreur de modification des points');
+      throw e;
+    }
+  };
+
+  const handleSaveSeasonHistory = async (history: SeasonHistorySnapshot) => {
+    if (!canModerate) return;
+    setError(null);
+    setSyncMessage(null);
+    try {
+      await saveSeasonHistorySnapshot(history);
+      await refresh();
+      setSyncMessage('Historique de saison mis à jour.');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Erreur de modification de l'historique");
+      throw e;
     }
   };
 
@@ -1309,7 +1562,7 @@ export function BrawlClubManagerApp() {
                     <TabsTrigger value="players" className="rounded-full">Joueurs</TabsTrigger>
                     <TabsTrigger value="clubs" className="rounded-full">Clubs</TabsTrigger>
                     <TabsTrigger value="ranking" className="rounded-full">Classement</TabsTrigger>
-                    <TabsTrigger value="pig" className="rounded-full">pig</TabsTrigger>
+                    <TabsTrigger value="pig" className="rounded-full">Tournois / paris</TabsTrigger>
                   </TabsList>
 
                   <TabsContent value="players" className="mt-6">
@@ -1404,7 +1657,7 @@ export function BrawlClubManagerApp() {
                       {clubs.map((club) => {
                         const clubPlayers = players.filter((player) => player.clubId === club.id);
                         const totalPush = clubPlayers.reduce((acc, player) => acc + calculatePush(player.current, player.end), 0);
-                        const totalPoints = clubPlayers.reduce((acc, player) => acc + calculatePoints(calculatePush(player.current, player.end), club.objective, club.bigObjective), 0);
+                        const totalPoints = clubPlayers.reduce((acc, player) => acc + calculatePlayerPoints(player, club), 0);
 
                         return (
                           <Card key={club.id} className="overflow-hidden rounded-[2rem] border-white/10 bg-black/45 shadow-2xl backdrop-blur-xl">
@@ -1479,6 +1732,52 @@ export function BrawlClubManagerApp() {
                         </Select>
                       </div>
                     </div>
+
+                    {canManagePoints && rankingTab === 'points' && (
+                      <Card className="mb-4 overflow-hidden rounded-[2rem] border-orange-500/20 bg-orange-500/10 shadow-2xl backdrop-blur-xl">
+                        <CardHeader>
+                          <CardTitle className="flex items-center gap-2 text-white">
+                            <Shield className="h-5 w-5 text-orange-300" />Gestion points Staff BP
+                          </CardTitle>
+                          <CardDescription>Recherche un joueur puis ajoute ou retire des points. Chaque action part dans les logs.</CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-4">
+                          <Input value={pointSearch} onChange={(event) => setPointSearch(event.target.value)} placeholder="Chercher un joueur, un club, un rôle..." />
+                          <div className="grid max-h-[420px] gap-3 overflow-y-auto pr-1">
+                            {pointsManagementRows.length === 0 ? (
+                              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-zinc-400">Aucun joueur trouvé.</div>
+                            ) : (
+                              pointsManagementRows.slice(0, 30).map((row) => {
+                                const player = players.find((item) => item.id === row.membershipId);
+                                const adjustment = player?.pointsAdjustment ?? 0;
+                                return (
+                                  <div key={`staff-bp-${row.membershipId}`} className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-black/35 p-4 sm:flex-row sm:items-center sm:justify-between">
+                                    <div className="min-w-0">
+                                      <p className="break-words font-bold text-white">{row.playerName}</p>
+                                      <p className="break-words text-sm text-zinc-400">{row.clubName} • {row.role} • +{formatNumber(row.trophiesPush)} trophées</p>
+                                      {adjustment !== 0 && (
+                                        <p className={adjustment > 0 ? 'mt-1 text-xs text-emerald-300' : 'mt-1 text-xs text-red-300'}>
+                                          Ajustement manuel : {adjustment > 0 ? '+' : ''}{adjustment}
+                                        </p>
+                                      )}
+                                    </div>
+                                    <div className="flex shrink-0 items-center gap-3">
+                                      <div className="rounded-2xl border border-orange-500/20 bg-orange-500/10 px-4 py-3 text-right">
+                                        <p className="text-xs text-orange-300/80">Total</p>
+                                        <p className="font-bold text-orange-300">{row.points} pts</p>
+                                      </div>
+                                      <Button variant="outline" onClick={() => setPointDialogPlayerId(row.membershipId)}>
+                                        <PencilLine className="mr-2 h-4 w-4" />Modifier
+                                      </Button>
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )}
 
                     <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
                       <Card className="overflow-hidden rounded-[2rem] border-white/10 bg-black/45 shadow-2xl backdrop-blur-xl">
@@ -1572,22 +1871,22 @@ export function BrawlClubManagerApp() {
                     <Card className="overflow-hidden rounded-[2rem] border-white/10 bg-black/35 shadow-2xl backdrop-blur-xl">
                       <CardHeader>
                         <CardTitle className="flex items-center gap-2 text-white">
-                          <StickyNote className="h-5 w-5 text-orange-400" /> pig
+                          <StickyNote className="h-5 w-5 text-orange-400" />Tournois / paris
                         </CardTitle>
-                        <CardDescription>Section temporairement indisponible.</CardDescription>
+                        <CardDescription>Tableaux, poules et paris bientôt ici.</CardDescription>
                       </CardHeader>
                       <CardContent>
                         <div className="flex min-h-[320px] flex-col items-center justify-center rounded-[1.5rem] border border-white/10 bg-white/5 px-6 py-10 text-center">
                           <div className="mb-4 rounded-2xl border border-orange-500/20 bg-orange-500/10 p-4 text-orange-300">
                             <StickyNote className="h-8 w-8" />
                           </div>
-                          <h3 className="text-xl font-bold text-white">Pig en construction</h3>
+                          <h3 className="text-xl font-bold text-white">Tournois / paris en construction</h3>
                           <p className="mt-3 max-w-xl text-sm text-zinc-400">
                             Cette partie est désactivée pour le moment.
-                            Le bloc note a été retiré temporairement en attendant une vraie version propre.
+                            Elle servira à afficher les tournois, les paris en cours et les tableaux staff.
                           </p>
                           <p className="mt-2 text-xs text-zinc-500">
-                            Personne ne peut rien écrire ici pour l’instant.
+                            Personne ne peut miser directement ici pour l’instant : les mises passeront par le bot Prairie.
                           </p>
                         </div>
                       </CardContent>
@@ -1684,6 +1983,90 @@ export function BrawlClubManagerApp() {
                 </Button>
               </CardContent>
             </Card>
+
+            <Card className="overflow-hidden rounded-[2rem] border-white/10 bg-black/45 shadow-2xl backdrop-blur-xl">
+              <CardHeader className="flex flex-row items-center justify-between gap-3">
+                <CardTitle className="flex items-center gap-2 text-white">
+                  <History className="h-5 w-5 text-orange-400" />Historique saison
+                </CardTitle>
+                {isAdminMode && canModerate && seasonHistory && (
+                  <Button variant="outline" className="px-3 py-2 text-xs" onClick={() => setSeasonHistoryEditOpen(true)}>
+                    <PencilLine className="mr-2 h-4 w-4" />Modifier
+                  </Button>
+                )}
+              </CardHeader>
+              <CardContent>
+                {!seasonHistory ? (
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-zinc-400">
+                    Aucun historique disponible pour le moment. Il apparaîtra après la prochaine clôture de saison.
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="rounded-3xl border border-white/10 bg-white/5 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="break-words text-xl font-black text-white">{seasonHistory.seasonName}</p>
+                          <p className="mt-1 text-sm text-zinc-400">
+                            {formatHistoryDate(seasonHistory.startsAt)} → {formatHistoryDate(seasonHistory.endsAt)}
+                          </p>
+                        </div>
+                        <Badge className="shrink-0 border-orange-500/20 bg-orange-500/10 text-orange-300">
+                          {seasonHistory.seasonNumber ? `S${seasonHistory.seasonNumber}` : 'Saison'}
+                        </Badge>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                        <p className="text-xs text-zinc-500">Membres</p>
+                        <p className="mt-1 font-bold text-white">{seasonHistory.membersCount}</p>
+                      </div>
+                      <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-3">
+                        <p className="text-xs text-emerald-300/80">Push total</p>
+                        <p className="mt-1 font-bold text-emerald-300">+{formatNumber(seasonHistory.totalPush)}</p>
+                      </div>
+                      <div className="rounded-2xl border border-orange-500/20 bg-orange-500/10 p-3 sm:col-span-2">
+                        <p className="text-xs text-orange-300/80">Clan avec le plus gros push</p>
+                        <p className="mt-1 break-words font-bold text-orange-300">
+                          {seasonHistory.topClubName ?? '—'} {seasonHistory.topClubPush > 0 ? `• +${formatNumber(seasonHistory.topClubPush)}` : ''}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                      <p className="mb-3 text-sm font-semibold text-white">Premiers de chaque club</p>
+                      <div className="space-y-2">
+                        {seasonHistory.clubLeaders.length === 0 ? (
+                          <p className="text-sm text-zinc-400">—</p>
+                        ) : (
+                          seasonHistory.clubLeaders.map((leader) => (
+                            <div key={`${leader.clubName}-${leader.playerName}`} className="flex items-center justify-between gap-3 text-sm">
+                              <span className="min-w-0 break-words text-zinc-300">{leader.clubName} : <span className="font-medium text-white">{leader.playerName}</span></span>
+                              <span className="shrink-0 font-semibold text-emerald-300">+{formatNumber(leader.trophiesPush)}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4">
+                      <p className="text-sm font-semibold text-cyan-300">Vainqueurs tournois</p>
+                      {seasonHistory.tournamentWinners.length === 0 ? (
+                        <p className="mt-1 text-sm text-zinc-400">À venir.</p>
+                      ) : (
+                        <div className="mt-3 space-y-2">
+                          {seasonHistory.tournamentWinners.map((winner, index) => (
+                            <div key={`${winner.title}-${index}`} className="text-sm text-zinc-200">
+                              <span className="font-medium text-white">{winner.title || 'Tournoi'}</span> • {winner.winner || '—'} {winner.date ? `• ${formatHistoryDate(winner.date)}` : ''}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </div>
         </div>
       </div>
@@ -1718,6 +2101,19 @@ export function BrawlClubManagerApp() {
       <ClubEditDialog open={Boolean(editingClub)} onOpenChange={(value) => !value && setEditingClubId(null)} club={editingClub} onSave={handleSaveClub} />
       <PlayerEditDialog open={Boolean(editingPlayer)} onOpenChange={(value) => !value && setEditingPlayerId(null)} player={editingPlayer} club={editingPlayerClub} onSave={handleSavePlayer} />
       <PlayerDetailDialog open={Boolean(detailPlayer)} onOpenChange={(value) => !value && setDetailPlayerId(null)} player={detailPlayer} club={detailPlayerClub} onDelete={handleDeletePlayer} />
+      <PointAdjustmentDialog
+        open={Boolean(pointDialogPlayer)}
+        onOpenChange={(value) => !value && setPointDialogPlayerId(null)}
+        player={pointDialogPlayer}
+        club={pointDialogClub}
+        onSave={(deltaPoints, reason) => handleAdjustPlayerPoints(pointDialogPlayerId ?? '', deltaPoints, reason)}
+      />
+      <SeasonHistoryEditDialog
+        open={seasonHistoryEditOpen}
+        onOpenChange={setSeasonHistoryEditOpen}
+        history={seasonHistory}
+        onSave={handleSaveSeasonHistory}
+      />
     </div>
   );
 }
