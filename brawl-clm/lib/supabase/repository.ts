@@ -25,6 +25,7 @@ export type Player = {
   lastSeen: string;
   seasonHistory: number[];
   isNew: boolean;
+  pointsAdjustment?: number;
 };
 
 export type AdminLogEntry = { id: string; message: string; createdAt: string };
@@ -40,16 +41,46 @@ export type RankingTrophiesRow = { membershipId: string; playerName: string; rol
 export type RankingPointsRow = { membershipId: string; playerName: string; role: Player['role']; clubName: string; points: number; trophiesPush: number };
 export type StaffMe = {
   isLoggedIn: boolean;
-  role: 'owner' | 'moderator' | 'viewer';
+  role: 'owner' | 'admin' | 'moderator' | 'staff_bp' | 'viewer';
   displayName: string | null;
   email: string | null;
   canModerate: boolean;
+  canManagePoints: boolean;
 };
 export type SyncStatus = {
   lastSyncAt: string | null;
   nextScheduledSyncAt: string | null;
-  syncIntervalMinutes: number;
+  syncIntervalMinutes: number | null;
 };
+
+export type SeasonHistoryClubLeader = {
+  clubName: string;
+  playerName: string;
+  trophiesPush: number;
+};
+
+export type TournamentWinner = {
+  title: string;
+  winner: string;
+  date: string | null;
+};
+
+export type SeasonHistorySnapshot = {
+  id: string;
+  seasonId: string;
+  seasonName: string;
+  seasonNumber?: number | null;
+  startsAt?: string | null;
+  endsAt?: string | null;
+  membersCount: number;
+  totalPush: number;
+  topClubName: string | null;
+  topClubPush: number;
+  clubLeaders: SeasonHistoryClubLeader[];
+  tournamentWinners: TournamentWinner[];
+  isFallback?: boolean;
+};
+
 
 export async function getAuthHeaders(): Promise<Record<string, string>> {
   if (!supabase) return {};
@@ -111,6 +142,7 @@ export async function loadDashboardData() {
     trophiesRanking: RankingTrophiesRow[];
     pointsRanking: RankingPointsRow[];
     syncStatus: SyncStatus;
+    seasonHistory: SeasonHistorySnapshot | null;
   }>(`/api/dashboard?t=${Date.now()}`);
 }
 
@@ -140,4 +172,13 @@ export async function closeAndOpenNextSeason() {
 
 export async function saveSeason(input: { seasonId: string; name: string }) {
   await apiFetch('/api/seasons/save', { method: 'POST', body: JSON.stringify(input) });
+}
+
+
+export async function adjustPlayerPoints(input: { seasonId: string; membershipId: string; deltaPoints: number; reason?: string }) {
+  await apiFetch('/api/points/adjust', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export async function saveSeasonHistorySnapshot(input: SeasonHistorySnapshot) {
+  await apiFetch('/api/seasons/history/save', { method: 'POST', body: JSON.stringify(input) });
 }
