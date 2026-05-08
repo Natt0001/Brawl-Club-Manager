@@ -26,6 +26,7 @@ export type Player = {
   lastSeen: string;
   seasonHistory: number[];
   isNew: boolean;
+  pointsAdjustment?: number;
 };
 
 export type AdminLogEntry = { id: string; message: string; createdAt: string };
@@ -38,11 +39,39 @@ export type SeasonOption = {
   endsAt?: string | null;
 };
 export type RankingTrophiesRow = { membershipId: string; playerName: string; role: Player['role']; clubName: string; trophiesPush: number };
-export type RankingPointsRow = { membershipId: string; playerName: string; role: Player['role']; clubName: string; points: number; trophiesPush: number };
+export type RankingPointsRow = { membershipId: string; playerName: string; role: Player['role']; clubName: string; points: number; trophiesPush: number; pointsAdjustment?: number };
 export type SyncStatus = {
   lastSyncAt: string | null;
   nextScheduledSyncAt: string | null;
   syncIntervalMinutes: number | null;
+};
+
+export type SeasonHistoryClubLeader = {
+  clubName: string;
+  playerName: string;
+  trophiesPush: number;
+};
+
+export type TournamentWinner = {
+  title: string;
+  winner: string;
+  date: string | null;
+};
+
+export type SeasonHistorySnapshot = {
+  id: string;
+  seasonId: string;
+  seasonName: string;
+  seasonNumber?: number | null;
+  startsAt?: string | null;
+  endsAt?: string | null;
+  membersCount: number;
+  totalPush: number;
+  topClubName: string | null;
+  topClubPush: number;
+  clubLeaders: SeasonHistoryClubLeader[];
+  tournamentWinners: TournamentWinner[];
+  isFallback?: boolean;
 };
 
 type MembershipStatus = 'active' | 'inactive' | 'left';
@@ -226,6 +255,69 @@ export async function getClubsForSeasonServer(seasonId: string): Promise<Club[]>
   });
 }
 
+
+async function getPointAdjustmentsMap(seasonId: string) {
+  const client = getSupabaseServerClient();
+  const { data, error } = await client
+    .from('manual_point_adjustments')
+    .select('membership_id,delta_points')
+    .eq('season_id', seasonId);
+
+  if (error) {
+    if (error.code === '42P01' || error.message?.includes('manual_point_adjustments')) {
+      return new Map<string, number>();
+    }
+    throw error;
+  }
+
+  const map = new Map<string, number>();
+  for (const row of data ?? []) {
+    const membershipId = String((row as any).membership_id);
+    map.set(membershipId, (map.get(membershipId) ?? 0) + Number((row as any).delta_points ?? 0));
+  }
+  return map;
+}
+
+function normalizeClubLeaders(value: unknown): SeasonHistoryClubLeader[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item: any) => ({
+      clubName: String(item?.clubName ?? item?.club_name ?? '').trim(),
+      playerName: String(item?.playerName ?? item?.player_name ?? '').trim(),
+      trophiesPush: Number(item?.trophiesPush ?? item?.trophies_push ?? 0),
+    }))
+    .filter((item) => item.clubName && item.playerName);
+}
+
+function normalizeTournamentWinners(value: unknown): TournamentWinner[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item: any) => ({
+      title: String(item?.title ?? '').trim(),
+      winner: String(item?.winner ?? '').trim(),
+      date: item?.date ? String(item.date) : null,
+    }))
+    .filter((item) => item.title || item.winner);
+}
+
+function mapSeasonHistoryRow(row: any, isFallback = false): SeasonHistorySnapshot {
+  return {
+    id: row.id ?? `fallback-${row.season_id}`,
+    seasonId: row.season_id,
+    seasonName: row.season_name,
+    seasonNumber: row.season_number,
+    startsAt: row.season_starts_at,
+    endsAt: row.season_ends_at,
+    membersCount: Number(row.members_count ?? 0),
+    totalPush: Number(row.total_push ?? 0),
+    topClubName: row.top_club_name ?? null,
+    topClubPush: Number(row.top_club_push ?? 0),
+    clubLeaders: normalizeClubLeaders(row.club_leaders),
+    tournamentWinners: normalizeTournamentWinners(row.tournament_winners),
+    isFallback,
+  };
+}
+
 export async function getPlayersForSeasonServer(seasonId: string): Promise<Player[]> {
   const client = getSupabaseServerClient();
 
@@ -254,6 +346,8 @@ export async function getPlayersForSeasonServer(seasonId: string): Promise<Playe
 
   if (error) throw error;
 
+  const pointAdjustments = await getPointAdjustmentsMap(seasonId);
+
   return (data ?? [])
     .filter((row: any) => isVisibleDashboardStatus(row.status))
     .map((row: any) => {
@@ -272,6 +366,7 @@ export async function getPlayersForSeasonServer(seasonId: string): Promise<Playe
         lastSeen: formatLastSeen(row.last_seen_at),
         seasonHistory: [],
         isNew: newBadgeMeta.isNew,
+        pointsAdjustment: pointAdjustments.get(row.id) ?? 0,
       };
     });
 }
@@ -308,19 +403,26 @@ export async function getPointsRankingServer(seasonId: string, limit = 50): Prom
     .from('memberships')
     .select(`id,role,status,push_cached,points_cached,club:clubs(name),person:persons(display_name,game_name)`)
     .eq('season_id', seasonId)
-    .neq('status', 'left')
-    .order('points_cached', { ascending: false })
-    .order('push_cached', { ascending: false })
-    .limit(limit);
+    .neq('status', 'left');
   if (error) throw error;
-  return (data ?? []).map((row: any) => ({
-    membershipId: row.id,
-    playerName: extractPersonName(row.person),
-    role: roleToFront(row.role),
-    clubName: Array.isArray(row.club) ? row.club[0]?.name ?? '—' : row.club?.name ?? '—',
-    points: Number(row.points_cached ?? 0),
-    trophiesPush: Number(row.push_cached ?? 0),
-  }));
+
+  const pointAdjustments = await getPointAdjustmentsMap(seasonId);
+
+  return (data ?? [])
+    .map((row: any) => {
+      const adjustment = pointAdjustments.get(row.id) ?? 0;
+      return {
+        membershipId: row.id,
+        playerName: extractPersonName(row.person),
+        role: roleToFront(row.role),
+        clubName: Array.isArray(row.club) ? row.club[0]?.name ?? '—' : row.club?.name ?? '—',
+        points: Number(row.points_cached ?? 0) + adjustment,
+        trophiesPush: Number(row.push_cached ?? 0),
+        pointsAdjustment: adjustment,
+      };
+    })
+    .sort((a, b) => b.points - a.points || b.trophiesPush - a.trophiesPush)
+    .slice(0, limit);
 }
 
 export async function exportSeasonRowsServer(seasonId: string) {
@@ -351,6 +453,7 @@ export async function exportSeasonRowsServer(seasonId: string) {
       return [row.id, meta] as const;
     }),
   );
+  const pointAdjustments = await getPointAdjustmentsMap(seasonId);
 
   return (data ?? []).map((row: any) => {
     const meta = membershipMeta.get(row.membership_id) ?? { isNew: false, joinedAt: null };
@@ -371,12 +474,192 @@ export async function exportSeasonRowsServer(seasonId: string) {
       notes: row.internal_notes ?? '',
       objective_trophies: Number(row.objective_trophies ?? 0),
       big_objective_trophies: Number(row.big_objective_trophies ?? 0),
-      objective_points: Number(row.objective_points ?? 0),
+      objective_points: Number(row.objective_points ?? 0) + (pointAdjustments.get(row.membership_id) ?? 0),
+      points_adjustment: pointAdjustments.get(row.membership_id) ?? 0,
       game_tag: row.game_tag ?? '',
       status: (row.status ?? 'active') as MembershipStatus,
       is_new: meta.isNew,
       joined_at: meta.joinedAt,
     };
+  });
+}
+
+
+async function calculateSeasonHistorySnapshot(seasonId: string, forcedEndsAt?: string | null): Promise<Omit<SeasonHistorySnapshot, 'id' | 'isFallback'>> {
+  const client = getSupabaseServerClient();
+  const { data: season, error: seasonError } = await client
+    .from('seasons')
+    .select('id,name,season_number,starts_at,ends_at')
+    .eq('id', seasonId)
+    .single();
+  if (seasonError) throw seasonError;
+
+  const { data: rows, error: rowsError } = await client
+    .from('memberships')
+    .select(`
+      id,
+      club_id,
+      status,
+      push_cached,
+      trophies_start,
+      current_trophies,
+      peak_trophies,
+      trophies_end,
+      club:clubs(name),
+      person:persons(display_name,game_name)
+    `)
+    .eq('season_id', seasonId)
+    .neq('status', 'left');
+  if (rowsError) throw rowsError;
+
+  const visibleRows = rows ?? [];
+  const membersCount = visibleRows.length;
+  const totalPush = visibleRows.reduce((sum: number, row: any) => {
+    const fallbackPeak = Number(row.peak_trophies ?? row.current_trophies ?? row.trophies_end ?? row.trophies_start ?? 0);
+    const fallbackStart = Number(row.trophies_start ?? 0);
+    return sum + Number(row.push_cached ?? Math.max(0, fallbackPeak - fallbackStart));
+  }, 0);
+
+  const clubTotals = new Map<string, { clubName: string; totalPush: number }>();
+  const clubLeadersMap = new Map<string, SeasonHistoryClubLeader>();
+
+  for (const row of visibleRows as any[]) {
+    const clubName = Array.isArray(row.club) ? row.club[0]?.name ?? '—' : row.club?.name ?? '—';
+    const fallbackPeak = Number(row.peak_trophies ?? row.current_trophies ?? row.trophies_end ?? row.trophies_start ?? 0);
+    const fallbackStart = Number(row.trophies_start ?? 0);
+    const trophiesPush = Number(row.push_cached ?? Math.max(0, fallbackPeak - fallbackStart));
+    const previousTotal = clubTotals.get(row.club_id) ?? { clubName, totalPush: 0 };
+    previousTotal.totalPush += trophiesPush;
+    clubTotals.set(row.club_id, previousTotal);
+
+    const currentLeader = clubLeadersMap.get(row.club_id);
+    if (!currentLeader || trophiesPush > currentLeader.trophiesPush) {
+      clubLeadersMap.set(row.club_id, {
+        clubName,
+        playerName: extractPersonName(row.person),
+        trophiesPush,
+      });
+    }
+  }
+
+  const topClub = [...clubTotals.values()].sort((a, b) => b.totalPush - a.totalPush)[0] ?? null;
+
+  return {
+    seasonId: season.id,
+    seasonName: season.name,
+    seasonNumber: season.season_number,
+    startsAt: season.starts_at,
+    endsAt: forcedEndsAt ?? season.ends_at,
+    membersCount,
+    totalPush,
+    topClubName: topClub?.clubName ?? null,
+    topClubPush: topClub?.totalPush ?? 0,
+    clubLeaders: [...clubLeadersMap.values()].sort((a, b) => a.clubName.localeCompare(b.clubName, 'fr')),
+    tournamentWinners: [],
+  };
+}
+
+export async function getLatestSeasonHistoryServer(): Promise<SeasonHistorySnapshot | null> {
+  const client = getSupabaseServerClient();
+  const { data, error } = await client
+    .from('season_history_snapshots')
+    .select('*')
+    .order('season_ends_at', { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!error && data) return mapSeasonHistoryRow(data);
+  if (error && !(error.code === '42P01' || error.message?.includes('season_history_snapshots'))) throw error;
+
+  const { data: closedSeason, error: closedSeasonError } = await client
+    .from('seasons')
+    .select('id')
+    .eq('status', 'closed')
+    .order('ends_at', { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (closedSeasonError || !closedSeason) return null;
+  const fallback = await calculateSeasonHistorySnapshot((closedSeason as any).id);
+  return { ...fallback, id: `fallback-${fallback.seasonId}`, isFallback: true };
+}
+
+export async function saveSeasonHistorySnapshotServer(input: SeasonHistorySnapshot, actor?: StaffActor) {
+  const client = getSupabaseServerClient();
+  const cleanName = input.seasonName.trim();
+  if (!cleanName) throw new Error('Nom de saison invalide');
+
+  const payload = {
+    season_id: input.seasonId,
+    season_name: cleanName,
+    season_number: input.seasonNumber ?? null,
+    season_starts_at: input.startsAt ?? null,
+    season_ends_at: input.endsAt ?? null,
+    members_count: Math.max(0, Number(input.membersCount ?? 0)),
+    total_push: Math.max(0, Number(input.totalPush ?? 0)),
+    top_club_name: input.topClubName?.trim() || null,
+    top_club_push: Math.max(0, Number(input.topClubPush ?? 0)),
+    club_leaders: normalizeClubLeaders(input.clubLeaders) as any,
+    tournament_winners: normalizeTournamentWinners(input.tournamentWinners) as any,
+    updated_by: actor?.userId ?? null,
+  };
+
+  const { error } = await client
+    .from('season_history_snapshots')
+    .upsert(payload, { onConflict: 'season_id' });
+  if (error) throw error;
+
+  await insertAdminLog({
+    actor,
+    entityType: 'season_history',
+    entityId: input.seasonId,
+    action: 'update',
+    message: `${actorLabel(actor)} a modifié l'historique de ${cleanName}`,
+    payloadAfter: payload,
+  });
+}
+
+async function createSeasonHistorySnapshotForSeasonServer(seasonId: string, actor?: StaffActor, forcedEndsAt?: string | null) {
+  const snapshot = await calculateSeasonHistorySnapshot(seasonId, forcedEndsAt);
+  await saveSeasonHistorySnapshotServer({ ...snapshot, id: `snapshot-${seasonId}` }, actor);
+}
+
+export async function adjustMembershipPointsServer(
+  input: { seasonId: string; membershipId: string; deltaPoints: number; reason?: string },
+  actor?: StaffActor,
+) {
+  const client = getSupabaseServerClient();
+  const deltaPoints = Number(input.deltaPoints ?? 0);
+  if (!Number.isFinite(deltaPoints) || deltaPoints === 0) throw new Error('Nombre de points invalide');
+
+  const { data: membership, error: membershipError } = await client
+    .from('memberships')
+    .select('id,season_id,points_cached,person:persons(display_name,game_name)')
+    .eq('id', input.membershipId)
+    .eq('season_id', input.seasonId)
+    .single();
+  if (membershipError) throw membershipError;
+
+  const { error } = await client.from('manual_point_adjustments').insert({
+    season_id: input.seasonId,
+    membership_id: input.membershipId,
+    delta_points: deltaPoints,
+    reason: input.reason?.trim() || null,
+    created_by: actor?.userId ?? null,
+  });
+  if (error) throw error;
+
+  const playerName = extractPersonName((membership as any).person);
+  const sign = deltaPoints > 0 ? '+' : '';
+
+  await insertAdminLog({
+    actor,
+    entityType: 'manual_points',
+    entityId: input.membershipId,
+    action: 'adjust',
+    message: `${actorLabel(actor)} a modifié les points de ${playerName} (${sign}${deltaPoints})`,
+    payloadBefore: { points_cached: (membership as any).points_cached },
+    payloadAfter: { deltaPoints, reason: input.reason?.trim() || null },
   });
 }
 
@@ -404,16 +687,17 @@ export async function getSyncStatusServer(): Promise<SyncStatus> {
 
 export async function loadDashboardDataServer() {
   const activeSeason = await getActiveSeasonServer();
-  const [clubs, players, logs, trophiesRanking, pointsRanking, syncStatus] = await Promise.all([
+  const [clubs, players, logs, trophiesRanking, pointsRanking, syncStatus, seasonHistory] = await Promise.all([
     getClubsForSeasonServer(activeSeason.id),
     getPlayersForSeasonServer(activeSeason.id),
     getAdminLogsServer(20),
     getTrophiesRankingServer(activeSeason.id, 10),
     getPointsRankingServer(activeSeason.id, 50),
     getSyncStatusServer(),
+    getLatestSeasonHistoryServer(),
   ]);
 
-  return { activeSeason, clubs, players, logs, trophiesRanking, pointsRanking, syncStatus };
+  return { activeSeason, clubs, players, logs, trophiesRanking, pointsRanking, syncStatus, seasonHistory };
 }
 
 export async function saveClubSettingsServer(
@@ -615,6 +899,8 @@ export async function closeAndOpenNextSeasonServer(actor?: StaffActor) {
     .select('club_id, objective_trophies, big_objective_trophies')
     .eq('season_id', activeSeason.id);
   if (settingsError) throw settingsError;
+
+  await createSeasonHistorySnapshotForSeasonServer(activeSeason.id, actor, nowIso);
 
   const { error: closeError } = await client
     .from('seasons')
