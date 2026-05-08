@@ -2,7 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import type { NextRequest } from 'next/server';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 
-export type StaffRole = 'owner' | 'moderator' | 'viewer';
+export type StaffRole = 'owner' | 'admin' | 'moderator' | 'staff_bp' | 'viewer';
 
 export type StaffContext = {
   userId: string;
@@ -56,8 +56,19 @@ export async function requireStaff(request: NextRequest) {
   if (!staff) {
     throw new Error('Connexion staff requise');
   }
-  if (!['owner', 'moderator'].includes(staff.role)) {
+  if (!['owner', 'admin', 'moderator', 'staff_bp'].includes(staff.role)) {
     throw new Error('Accès réservé au staff');
+  }
+  return staff;
+}
+
+export async function requirePointsStaff(request: NextRequest) {
+  const staff = await getRequestStaffContext(request);
+  if (!staff) {
+    throw new Error('Connexion staff requise');
+  }
+  if (!['owner', 'staff_bp'].includes(staff.role)) {
+    throw new Error('Accès réservé au staff BP');
   }
   return staff;
 }
